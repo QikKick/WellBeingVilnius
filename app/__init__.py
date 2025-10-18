@@ -11,8 +11,14 @@ def create_app() -> Flask:
     # Register blueprints
     from .routes.main import bp as home_bp
     from .routes.dev import bp as dev_bp
+    from .routes.profile import bp as profile_bp
+    from .routes.friends import bp as friends_bp
+    from .routes.info_map import bp as infomap_bp
 
     app.register_blueprint(home_bp)
     app.register_blueprint(dev_bp)
+    app.register_blueprint(profile_bp)
+    app.register_blueprint(friends_bp)
+    app.register_blueprint(infomap_bp)
 
     return app
