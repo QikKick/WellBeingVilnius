@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ title or "WellBeingVilnius" }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+
+    <style>
+      /* Off-canvas sidebar */
+      .sidebar {
+        position: fixed;
+        top: 0;
+        right: 0;
+        height: 100vh;
+        width: 280px;
+        background: #fff;
+        box-shadow: -4px 0 20px rgba(0,0,0,0.12);
+        transform: translateX(100%);
+        transition: transform 240ms ease;
+        z-index: 1100;
+        padding: 1rem;
+        overflow: auto;
+      }
+      .sidebar.open { transform: translateX(0); }
+
+      /* Ensure Leaflet popups/tooltips and popup pane render above sidebar/overlay */
+      .leaflet-container .leaflet-popup,
+      .leaflet-container .leaflet-tooltip {
+        z-index: 1500 !important;
+      }
+      .leaflet-popup-pane {
+        z-index: 1500 !important;
+      }
+      .leaflet-shadow-pane,
+      .leaflet-marker-pane,
+      .leaflet-marker-icon,
+      .leaflet-marker-shadow {
+        z-index: 1400 !important;
+      }
+
+      /* Keep overlay/backdrops below popups */
+      #overlay {
+        z-index: 1100;
+      }
+
+      /* Basic header styling (can be overridden by main.css) */
+      .page-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.5rem 1rem;
+      }
+      .menu-toggle {
+        font-size: 1.25rem;
+        background: transparent;
+        border: none;
+        cursor: pointer;
+      }
+
+      /* Map wrapper height */
+      .map-wrap { height: calc(100vh - 120px); }
+      #map { height: 100%; }
+
+      /* Simple sheet/open classes (if main.css doesn't provide them) */
+      .overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; }
+      .overlay.open { display: flex; }
+      .sheet { background: #fff; border-radius: 8px; max-width: 420px; width: 92%; padding: 1rem; box-shadow: 0 10px 30px rgba(0,0,0,0.12); }
+      .sheet.open { display: block; }
+    </style>
+  </head>
+  <body>
+    <main class="container app">
+      <header class="page-header app-header">
+        <h1 style="margin:0;">{{ title or "WellBeing Vilnius" }}</h1>
+        <button id="menu-toggle" class="menu-toggle" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="sidebar">☰</button>
+      </header>
+
+      <nav id="sidebar" class="sidebar" role="navigation" aria-hidden="true">
+        <div class="sidebar-header" style="display:flex;justify-content:flex-end;">
+          <button id="sidebar-close" class="sidebar-close" type="button" aria-label="Close menu">×</button>
+        </div>
+        <ul class="sidebar-list" style="list-style:none;padding:0;margin:1rem 0;display:flex;flex-direction:column;gap:0.5rem;">
+          <li><a href="#" id="nav-paths" style="display:block;padding:0.75rem 0;border-bottom:1px solid rgba(0,0,0,0.04);">WellBeing Paths</a></li>
+          <li><a href="#" id="nav-info-map" style="display:block;padding:0.75rem 0;border-bottom:1px solid rgba(0,0,0,0.04);">Informational Map</a></li>
+          <li><a href="#" id="nav-profile" style="display:block;padding:0.75rem 0;border-bottom:1px solid rgba(0,0,0,0.04);">Profile</a></li>
+          <li style="margin-top:1rem;">
+            <button id="nav-logout" type="button" style="width:100%;padding:0.6rem;background:#e53e3e;color:#fff;border:none;border-radius:6px;">Logout</button>
+          </li>
+        </ul>
+      </nav>
+
+      <div class="btn-row" role="group" aria-label="Walk types" style="padding:0.5rem 1rem;">
+        <button id="open-wellness" type="button">Wellness Walk</button>
+        <button id="open-purpose" type="button">Purpose Walk</button>
+      </div>
+
+      <div class="map-wrap">
+        <div id="map" aria-label="Interactive map"></div>
+      </div>
+
+      <div id="overlay" class="overlay" aria-hidden="true">
+        <section id="sheet-wellness" class="sheet sheet-panel" role="dialog" aria-modal="true" aria-labelledby="wellness-title" style="display:none;">
+          <div class="sheet-header">
+            <h2 id="wellness-title" class="sheet-title">Wellness Walk</h2>
+            <button class="sheet-close" type="button" aria-label="Close">×</button>
+          </div>
+          <div class="sheet-section">
+            <label for="wellness-time">Time to walk</label>
+            <select id="wellness-time">
+              <option value="10">10min</option>
+              <option value="15">15min</option>
+              <option value="30">30min</option>
+              <option value="45">45min</option>
+              <option value="60">1h</option>
+              <option value="90">1h30min</option>
+              <option value="120">2h</option>
+            </select>
+          </div>
+          <div class="sheet-section">
+            <p>Add optional stops</p>
+            <div class="search-wrap">
+              <label for="wellness-stop-input" class="visually-hidden">Add stop</label>
+              <input id="wellness-stop-input" type="text" placeholder="Add stop (Vilnius)" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-owns="wellness-suggestions" />
+              <ul id="wellness-suggestions" class="suggestions" role="listbox" aria-label="Address suggestions"></ul>
+            </div>
+            <ul id="wellness-stops" class="inline-list" aria-label="Selected stops"></ul>
+          </div>
+          <div class="sheet-section">
+            <button id="wellness-find-route" type="button">Find Route</button>
+          </div>
+        </section>
+
+        <section id="sheet-purpose" class="sheet sheet-panel" role="dialog" aria-modal="true" aria-labelledby="purpose-title" style="display:none;">
+          <div class="sheet-header">
+            <h2 id="purpose-title" class="sheet-title">Purpose Walk</h2>
+            <button class="sheet-close" type="button" aria-label="Close">×</button>
+          </div>
+          <div class="sheet-section">
+            <label for="purpose-time">Max time</label>
+            <select id="purpose-time">
+              <option value="5">10min</option>
+              <option value="10">15min</option>
+              <option value="15">30min</option>
+              <option value="20">45min</option>
+              <option value="30">1h</option>
+              <option value="45">1h30min</option>
+              <option value="60">2h</option>
+            </select>
+          </div>
+          <div class="sheet-section">
+            <p>Destination</p>
+            <div class="search-wrap">
+              <label for="purpose-dest-input" class="visually-hidden">Destination</label>
+              <input id="purpose-dest-input" type="text" placeholder="Destination (Vilnius)" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-owns="purpose-dest-suggestions" />
+              <ul id="purpose-dest-suggestions" class="suggestions" role="listbox" aria-label="Destination suggestions"></ul>
+            </div>
+          </div>
+          <div class="sheet-section">
+            <p>Add optional stops</p>
+            <div class="search-wrap">
+              <label for="purpose-stop-input" class="visually-hidden">Add stop</label>
+              <input id="purpose-stop-input" type="text" placeholder="Add stop (Vilnius)" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-owns="purpose-suggestions" />
+              <ul id="purpose-suggestions" class="suggestions" role="listbox" aria-label="Address suggestions"></ul>
+            </div>
+            <ul id="purpose-stops" class="inline-list" aria-label="Selected stops"></ul>
+          </div>
+          <div class="sheet-section">
+            <button id="purpose-find-route" type="button">Find Route</button>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        // Map
+        const vilnius = [54.6872, 25.2797];
+        const map = L.map('map', { zoomControl: true }).setView(vilnius, 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // Ensure Leaflet panes have correct z-index at runtime
+        try {
+          if (map && map._panes) {
+            if (map._panes.popupPane) map._panes.popupPane.style.zIndex = 1500;
+            if (map._panes.markerPane) map._panes.markerPane.style.zIndex = 1400;
+            if (map._panes.shadowPane) map._panes.shadowPane.style.zIndex = 1400;
+          }
+          map.on('popupopen', (e) => {
+            const el = e.popup && e.popup._container;
+            if (el) el.style.zIndex = 1600;
+          });
+        } catch (err) {
+          console.warn('Leaflet pane zIndex tweak failed', err);
+        }
+
+        // Layers per flow
+        const wellnessStopsLayer = L.layerGroup().addTo(map);
+        const purposeStopsLayer = L.layerGroup().addTo(map);
+        const destLayer = L.layerGroup().addTo(map);
+
+        // User location marker & accuracy
+        let userMarker = null;
+        let accuracyCircle = null;
+
+        function locateAndZoom() {
+          if (!navigator.geolocation) {
+            // silently ignore if not supported
+            return;
+          }
+          navigator.geolocation.getCurrentPosition((pos) => {
+            const lat = pos.coords.latitude;
+            const lon = pos.coords.longitude;
+            const acc = pos.coords.accuracy || 50;
+            map.setView([lat, lon], 15);
+            if (userMarker) {
+              userMarker.setLatLng([lat, lon]);
+            } else {
+              userMarker = L.marker([lat, lon]).addTo(map).bindPopup('You are here');
+            }
+            if (accuracyCircle) {
+              accuracyCircle.setLatLng([lat, lon]);
+              accuracyCircle.setRadius(acc);
+            } else {
+              accuracyCircle = L.circle([lat, lon], { radius: acc, color: '#136AEC', fillColor: '#136AEC', fillOpacity: 0.15 }).addTo(map);
+            }
+            if (userMarker && userMarker.openPopup) userMarker.openPopup();
+          }, (err) => {
+            console.warn('Geolocation error', err);
+          }, { enableHighAccuracy: true, maximumAge: 60000, timeout: 10000 });
+        }
+
+        // optionally call on load (keeps existing behaviour)
+        locateAndZoom();
+
+        // Sidebar / burger toggle (off-canvas)
+        const menuToggle = document.getElementById('menu-toggle');
+        const sidebar = document.getElementById('sidebar');
+        const sidebarClose = document.getElementById('sidebar-close');
+
+        function openSidebar() {
+          sidebar.classList.add('open');
+          sidebar.setAttribute('aria-hidden', 'false');
+          menuToggle.setAttribute('aria-expanded', 'true');
+          document.body.classList.add('sidebar-open');
+        }
+        function closeSidebar() {
+          sidebar.classList.remove('open');
+          sidebar.setAttribute('aria-hidden', 'true');
+          menuToggle.setAttribute('aria-expanded', 'false');
+          document.body.classList.remove('sidebar-open');
+        }
+
+        menuToggle.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (sidebar.classList.contains('open')) closeSidebar();
+          else openSidebar();
+        });
+        sidebarClose.addEventListener('click', (e) => { e.stopPropagation(); closeSidebar(); });
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            if (sidebar.classList.contains('open')) closeSidebar();
+            if (overlay.classList.contains('open')) closeSheet();
+          }
+        });
+
+        // Close sidebar when clicking outside
+        document.addEventListener('click', (e) => {
+          if (!sidebar.contains(e.target) && e.target !== menuToggle && sidebar.classList.contains('open')) {
+            closeSidebar();
+          }
+        });
+
+        // Sidebar link hooks
+        document.getElementById('nav-paths').addEventListener('click', (e) => { e.preventDefault(); closeSidebar(); /* navigate to WellBeing Paths */ });
+        document.getElementById('nav-info-map').addEventListener('click', (e) => { e.preventDefault(); closeSidebar(); /* navigate to Informational Map */ });
+        document.getElementById('nav-profile').addEventListener('click', (e) => { e.preventDefault(); closeSidebar(); /* open Profile */ });
+        document.getElementById('nav-logout').addEventListener('click', (e) => { e.preventDefault(); /* perform logout */ });
+
+        // Overlay control
+        const overlay = document.getElementById('overlay');
+        const sheetWellness = document.getElementById('sheet-wellness');
+        const sheetPurpose = document.getElementById('sheet-purpose');
+        function openSheet(sheet) {
+          overlay.classList.add('open');
+          overlay.setAttribute('aria-hidden', 'false');
+          sheet.style.display = 'block';
+          sheet.classList.add('open');
+          document.body.classList.add('sheet-open');
+        }
+        function closeSheet() {
+          overlay.classList.remove('open');
+          overlay.setAttribute('aria-hidden', 'true');
+          sheetWellness.style.display = 'none';
+          sheetPurpose.style.display = 'none';
+          sheetWellness.classList.remove('open');
+          sheetPurpose.classList.remove('open');
+          document.body.classList.remove('sheet-open');
+        }
+        document.getElementById('open-wellness').addEventListener('click', () => openSheet(sheetWellness));
+        document.getElementById('open-purpose').addEventListener('click', () => openSheet(sheetPurpose));
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) closeSheet(); });
+        [...overlay.querySelectorAll('.sheet-close')].forEach(btn => btn.addEventListener('click', closeSheet));
+
+        // Address search (Nominatim) bounded to Vilnius
+        function fetchSuggestions(q, controller) {
+          if (!q) return Promise.resolve([]);
+          const params = new URLSearchParams({
+            format: 'jsonv2', q, addressdetails: '1', limit: '8', autocomplete: '1', dedupe: '1', countrycodes: 'lt',
+            viewbox: '25.00,54.90,25.50,54.55', bounded: '1', 'accept-language': 'lt'
+          });
+          const url = `https://nominatim.openstreetmap.org/search?${params.toString()}`;
+          return fetch(url, { signal: controller?.signal, headers: { 'Accept-Language': 'lt' } })
+            .then(r => r.ok ? r.json() : [])
+            .then(list => list.map(item => {
+              const addr = item.address || {};
+              const dn = item.display_name || '';
+              const parts = dn.split(',').map(s => s.trim()).filter(Boolean);
+              const city = addr.city || addr.town || addr.village || addr.municipality || '';
+              const suburb = addr.suburb || addr.neighbourhood || addr.quarter || '';
+              const road = addr.road || addr.pedestrian || addr.footway || addr.path || '';
+              const house = addr.house_number || '';
+              const main = item.name || ((road && house) ? `${road} ${house}` : road) || (parts[0] || item.type || '');
+              const locality = city || suburb;
+              const label = [main, locality].filter(Boolean).join(', ') || parts.slice(0,3).join(', ') || dn;
+              return { label, lat: parseFloat(item.lat), lon: parseFloat(item.lon) };
+            }))
+            .catch(() => []);
+        }
+
+        function createAutocomplete({ inputEl, suggestionsEl, onPick }) {
+          let activeIndex = -1, items = [], selected = null;
+          let debounceTimer = null, controller = null;
+
+          function clearSuggestions() {
+            suggestionsEl.innerHTML = '';
+            suggestionsEl.style.display = 'none';
+            inputEl.setAttribute('aria-expanded', 'false');
+            inputEl.removeAttribute('aria-activedescendant');
+            activeIndex = -1; items = [];
+            document.body.classList.remove('suggestions-open');
+          }
+          function render(list) {
+            items = list; activeIndex = -1;
+            suggestionsEl.innerHTML = '';
+            if (!items.length) { clearSuggestions(); return; }
+            items.forEach((it, idx) => {
+              const li = document.createElement('li');
+              li.className = 'suggestion-item';
+              li.id = `${inputEl.id}-opt-${idx}`;
+              li.setAttribute('role', 'option');
+              li.textContent = it.label;
+              li.addEventListener('mousedown', (e) => { e.preventDefault(); pick(idx); });
+              suggestionsEl.appendChild(li);
+            });
+            suggestionsEl.style.display = 'block';
+            inputEl.setAttribute('aria-expanded', 'true');
+            document.body.classList.add('suggestions-open');
+          }
+          function move(delta) {
+            if (!items.length) return;
+            activeIndex = (activeIndex + delta + items.length) % items.length;
+            [...suggestionsEl.children].forEach((el, i) => el.classList.toggle('active', i === activeIndex));
+            if (activeIndex >= 0) inputEl.setAttribute('aria-activedescendant', `${inputEl.id}-opt-${activeIndex}`);
+          }
+          function pick(index) {
+            const it = items[index];
+            if (!it) return;
+            selected = it;
+            inputEl.value = it.label;
+            onPick?.(it);
+            clearSuggestions();
+          }
+
+          inputEl.addEventListener('input', () => {
+            const q = inputEl.value.trim();
+            selected = null;
+            clearTimeout(debounceTimer);
+            if (!q) { clearSuggestions(); return; }
+            if (controller) controller.abort();
+            controller = new AbortController();
+            debounceTimer = setTimeout(async () => {
+              const list = await fetchSuggestions(q, controller);
+              render(list);
+            }, 250);
+          });
+          inputEl.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
+            else if (e.key === 'Enter') {
+              if (activeIndex >= 0) { e.preventDefault(); pick(activeIndex); }
+            } else if (e.key === 'Escape') { clearSuggestions(); }
+          });
+          document.addEventListener('click', (e) => {
+            if (!suggestionsEl.contains(e.target) && e.target !== inputEl) clearSuggestions();
+          });
+
+          return {
+            getSelected: () => selected,
+            clearSelected: () => { selected = null; }
+          };
+        }
+
+        // Helpers to manage list UI and markers
+        function addStopToList({ listEl, arr, layer, stop }) {
+          arr.push(stop);
+          const li = document.createElement('li');
+          const name = document.createElement('span');
+          name.textContent = stop.name || stop.label;
+          const rm = document.createElement('button');
+          rm.type = 'button'; rm.textContent = 'Remove';
+          li.appendChild(name); li.appendChild(rm);
+          listEl.appendChild(li);
+          const marker = L.marker([stop.lat, stop.lon]).addTo(layer).bindPopup(stop.label || stop.name || '');
+          stop._marker = marker;
+          rm.addEventListener('click', () => {
+            const idx = arr.indexOf(stop);
+            if (idx >= 0) arr.splice(idx, 1);
+            listEl.removeChild(li);
+            if (stop._marker) { layer.removeLayer(stop._marker); }
+          });
+        }
+
+        // Wellness autocomplete and UI
+        const wellnessStops = [];
+        const wellnessListEl = document.getElementById('wellness-stops');
+        const wellnessAddBtn = document.getElementById('wellness-add-stop');
+        const wellnessAuto = createAutocomplete({
+          inputEl: document.getElementById('wellness-stop-input'),
+          suggestionsEl: document.getElementById('wellness-suggestions'),
+          onPick: (it) => {
+            addStopToList({ listEl: wellnessListEl, arr: wellnessStops, layer: wellnessStopsLayer, stop: { ...it } });
+            wellnessAuto.clearSelected();
+          }
+        });
+        if (wellnessAddBtn) {
+          wellnessAddBtn.addEventListener('click', () => {
+            const it = wellnessAuto.getSelected();
+            if (it) {
+              addStopToList({ listEl: wellnessListEl, arr: wellnessStops, layer: wellnessStopsLayer, stop: { ...it } });
+              wellnessAuto.clearSelected();
+            }
+          });
+        }
+
+        // Purpose destination
+        let purposeDest = null;
+        const purposeDestAuto = createAutocomplete({
+          inputEl: document.getElementById('purpose-dest-input'),
+          suggestionsEl: document.getElementById('purpose-dest-suggestions'),
+          onPick: (it) => {
+            purposeDest = it;
+            destLayer.clearLayers();
+            L.marker([it.lat, it.lon]).addTo(destLayer).bindPopup(it.label);
+          }
+        });
+
+        // Purpose stops
+        const purposeStops = [];
+        const purposeListEl = document.getElementById('purpose-stops');
+        const purposeAddBtn = document.getElementById('purpose-add-stop');
+        const purposeAuto = createAutocomplete({
+          inputEl: document.getElementById('purpose-stop-input'),
+          suggestionsEl: document.getElementById('purpose-suggestions'),
+          onPick: (it) => {
+            addStopToList({ listEl: purposeListEl, arr: purposeStops, layer: purposeStopsLayer, stop: { ...it } });
+            purposeAuto.clearSelected();
+          }
+        });
+        if (purposeAddBtn) {
+          purposeAddBtn.addEventListener('click', () => {
+            const it = purposeAuto.getSelected();
+            if (it) {
+              addStopToList({ listEl: purposeListEl, arr: purposeStops, layer: purposeStopsLayer, stop: { ...it } });
+              purposeAuto.clearSelected();
+            }
+          });
+        }
+
+        // Find route placeholders
+        document.getElementById('wellness-find-route').addEventListener('click', () => {
+          alert(`Wellness: ${wellnessStops.length} stops. Routing not implemented yet.`);
+        });
+        document.getElementById('purpose-find-route').addEventListener('click', () => {
+          alert(`Purpose: dest ${purposeDest ? 'set' : 'not set'}, ${purposeStops.length} stops. Routing not implemented yet.`);
+        });
+      });
+    </script>
+  </body>
+</html>

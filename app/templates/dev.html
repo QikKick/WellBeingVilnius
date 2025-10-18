@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or "WellBeingVilnius" }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}" />
+    <!-- Leaflet CSS -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <style>
+      .controls { display:flex; flex-wrap:wrap; gap:.5rem; align-items:center; }
+      .controls label { font-size:.9rem; opacity:.9; }
+      .controls input, .controls select { padding:.4rem .5rem; border:1px solid rgba(127,127,127,.4); border-radius:.4rem; min-width:8rem; }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <header class="page-header">
+        <h1>{{ title or "WellBeingVilnius" }}</h1>
+        <p class="subtitle">Dev: Heat map from GeoJSON (backend endpoint, static, or local file).</p>
+      </header>
+
+      <div class="actions" style="gap:.75rem;align-items:flex-start">
+        <div class="controls">
+          <label>Weight <input id="weight-input" type="text" placeholder="auto (e.g., population)" /></label>
+          <label>Method
+            <select id="method-select">
+              <option value="reservoir" selected>reservoir</option>
+              <option value="first">first</option>
+            </select>
+          </label>
+          <label>Max points <input id="max-input" type="number" min="100" step="100" value="50000" /></label>
+          <button id="reload-btn" type="button" class="btn">Reload</button>
+        </div>
+        <label class="btn" for="file-input">Load local GeoJSON</label>
+        <input id="file-input" type="file" accept=".geojson,.json,application/geo+json,application/json" style="display:none" />
+        <button id="fit-btn" type="button" class="btn">Fit to data</button>
+        <span id="status" class="status" aria-live="polite"></span>
+      </div>
+
+      <!-- Map container -->
+      <div id="map" aria-label="Interactive map"></div>
+    </main>
+
+    <!-- Leaflet JS -->
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <!-- Leaflet.heat plugin -->
+    <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+    <!-- Turf.js for robust centroid calculation of polygons (used in static/local fallback) -->
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        const vilnius = [54.6872, 25.2797];
+        const statusEl = document.getElementById('status');
+        const fileInput = document.getElementById('file-input');
+        const geoUrl = "{{ url_for('static', filename='data/population_ltu_2019-07-01.geojson') }}";
+        const weightInput = document.getElementById('weight-input');
+        const methodSelect = document.getElementById('method-select');
+        const maxInput = document.getElementById('max-input');
+        const reloadBtn = document.getElementById('reload-btn');
+
+        function setStatus(text) { if (statusEl) statusEl.innerHTML = text || ''; }
+        function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+        // Init base map
+        const map = L.map('map', { zoomControl: true }).setView(vilnius, 7);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19,
+          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        let heatLayer = null;
+        let allLatLngs = [];
+
+        function fitToLatLngs(latlngs) {
+          if (!latlngs || latlngs.length === 0) return false;
+          const bounds = L.latLngBounds(latlngs);
+          if (bounds.isValid()) { map.fitBounds(bounds.pad(0.1)); return true; }
+          return false;
+        }
+
+        function renderHeat(points, latlngs) {
+          if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
+          heatLayer = L.heatLayer(points, { radius: 25, blur: 15, maxZoom: 12 }).addTo(map);
+          allLatLngs = latlngs;
+          if (!fitToLatLngs(allLatLngs)) map.setView(vilnius, 7);
+        }
+
+        // Backend endpoint loader (preferred for huge files)
+        async function loadHeatFromEndpoint(params) {
+          const url = new URL(window.location.origin + '/dev/heat-points');
+          url.searchParams.set('file', 'population_ltu_2019-07-01.geojson');
+          if (params?.max) url.searchParams.set('max', String(params.max));
+          if (params?.method) url.searchParams.set('method', String(params.method));
+          const w = (params?.weight || '').trim();
+          if (w) url.searchParams.set('weight', w);
+          if (params?.min_weight) url.searchParams.set('min_weight', params.min_weight);
+          if (params?.max_weight) url.searchParams.set('max_weight', params.max_weight);
+
+          setStatus(`Loading from <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a> …`);
+          try {
+            const res = await fetch(url.toString(), { cache: 'no-store' });
+            if (!res.ok) {
+              setStatus(`Endpoint error (HTTP ${res.status} ${esc(res.statusText)}) — try static or local.`);
+              return false;
+            }
+            const data = await res.json();
+            if (!data || !Array.isArray(data.points)) {
+              setStatus('Endpoint returned unexpected data.');
+              return false;
+            }
+            const latlngs = data.points.map(p => [Number(p[0]), Number(p[1])]);
+            renderHeat(data.points.map(p => [Number(p[0]), Number(p[1]), Number(p[2])]), latlngs);
+            const info = [
+              data.count != null ? `${data.count} points` : null,
+              data.weightKey ? `weight: ${esc(data.weightKey)}` : (w ? `weight: ${esc(w)} (requested)` : null),
+              (data.weightMin != null && data.weightMax != null) ? `range: ${esc(data.weightMin)}–${esc(data.weightMax)}` : null
+            ].filter(Boolean).join(' | ');
+            setStatus(`Heat map from endpoint (${info}).`);
+            return true;
+          } catch (err) {
+            console.error('Endpoint fetch error', err);
+            setStatus(`Endpoint network error: ${esc(err && err.message ? err.message : err)}`);
+            return false;
+          }
+        }
+
+        // Static URL loader (fallback) - unchanged from earlier; kept for dev convenience
+        async function loadHeatFromUrl(url) {
+          setStatus(`Loading GeoJSON from <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a> …`);
+          try {
+            const res = await fetch(url, { cache: 'no-store' });
+            const ctype = res.headers.get('content-type') || 'unknown';
+            if (!res.ok) {
+              setStatus(`Failed to load (HTTP ${res.status} ${esc(res.statusText)}; content-type: ${esc(ctype)}).`);
+              return false;
+            }
+            const text = await res.text();
+            let data;
+            try { data = JSON.parse(text); }
+            catch (e) {
+              setStatus(`Failed to parse JSON (content-type: ${esc(ctype)}). First 200 chars:<br><code>${esc(text.slice(0,200))}</code>`);
+              return false;
+            }
+            function pickWeightKey(props) { if (!props) return null; for (const k of ['population','pop','density','value','count']) if (k in props && isFinite(Number(props[k]))) return k; for (const [k,v] of Object.entries(props)) if (isFinite(Number(v))) return k; return null; }
+            function geometryToPoints(geom) {
+              const pts = []; if (!geom) return pts; const t = geom.type, c = geom.coordinates;
+              if (t==='Point' && Array.isArray(c)&&c.length>=2) pts.push([c[1],c[0]]);
+              else if (t==='MultiPoint') (c||[]).forEach(p=>{if(Array.isArray(p)&&p.length>=2) pts.push([p[1],p[0]])});
+              else if (t==='Polygon'||t==='MultiPolygon'){try{const cen=turf.centroid({type:'Feature',geometry:geom});const xy=cen&&cen.geometry&&cen.geometry.coordinates;if(Array.isArray(xy)&&xy.length>=2) pts.push([xy[1],xy[0]])}catch(_){}}
+              else if (t==='GeometryCollection')(geom.geometries||[]).forEach(g=>pts.push(...geometryToPoints(g)));
+              return pts;
+            }
+            const heatPts=[]; const weights=[]; const latlngs=[];
+            function handleFeature(feat){if(!feat||!feat.geometry) return; const props=feat.properties||{}; const key=pickWeightKey(props); const val=key?Number(props[key]):NaN; const pts=geometryToPoints(feat.geometry); pts.forEach(([lat,lng])=>{latlngs.push([lat,lng]); heatPts.push([lat,lng,isFinite(val)?val:1]); if(isFinite(val)) weights.push(val);});}
+            if (data.type==='FeatureCollection')(data.features||[]).forEach(handleFeature); else if (data.type==='Feature') handleFeature(data); else if (data.type&&data.coordinates) geometryToPoints(data).forEach(([lat,lng])=>{latlngs.push([lat,lng]); heatPts.push([lat,lng,1])});
+            let min=Math.min(...weights), max=Math.max(...weights); let points;
+            if (!isFinite(min)||!isFinite(max)||min===max) points=heatPts.map(([lat,lng])=>[lat,lng,1]); else { const span=max-min; points=heatPts.map(([lat,lng,w])=>{const i=isFinite(w)?(w-min)/span:1; const clamped=Math.max(0.1,Math.min(1,i)); return [lat,lng,clamped];}); }
+            renderHeat(points, latlngs);
+            setStatus(`Heat map built from static file with ${points.length} points.`);
+            return true;
+          } catch (err) {
+            console.error('Fetch error', err);
+            setStatus(`Network error while loading GeoJSON: ${esc(err && err.message ? err.message : err)}`);
+            return false;
+          }
+        }
+
+        function loadHeatFromFile(file) {
+          const reader = new FileReader();
+          reader.onerror = () => setStatus('Failed to read the selected file.');
+          reader.onload = () => {
+            try {
+              const data = JSON.parse(String(reader.result || ''));
+              const heatPts=[]; const weights=[]; const latlngs=[];
+              function pickWeightKey(props){if(!props) return null; for (const k of ['population','pop','density','value','count']) if (k in props && isFinite(Number(props[k]))) return k; for (const [k,v] of Object.entries(props)) if (isFinite(Number(v))) return k; return null;}
+              function geometryToPoints(geom){const pts=[]; if(!geom) return pts; const t=geom.type, c=geom.coordinates; if(t==='Point'&&Array.isArray(c)&&c.length>=2) pts.push([c[1],c[0]]); else if(t==='MultiPoint')(c||[]).forEach(p=>{if(Array.isArray(p)&&p.length>=2) pts.push([p[1],p[0]])}); else if(t==='Polygon'||t==='MultiPolygon'){try{const cen=turf.centroid({type:'Feature',geometry:geom}); const xy=cen&&cen.geometry&&cen.geometry.coordinates; if(Array.isArray(xy)&&xy.length>=2) pts.push([xy[1],xy[0]])}catch(_){}} else if(t==='GeometryCollection')(geom.geometries||[]).forEach(g=>pts.push(...geometryToPoints(g))); return pts;}
+              function handleFeature(feat){if(!feat||!feat.geometry) return; const props=feat.properties||{}; const key=pickWeightKey(props); const val=key?Number(props[key]):NaN; const pts=geometryToPoints(feat.geometry); pts.forEach(([lat,lng])=>{latlngs.push([lat,lng]); heatPts.push([lat,lng,isFinite(val)?val:1]); if(isFinite(val)) weights.push(val);});}
+              if (data.type==='FeatureCollection')(data.features||[]).forEach(handleFeature); else if (data.type==='Feature') handleFeature(data); else if (data.type&&data.coordinates) geometryToPoints(data).forEach(([lat,lng])=>{latlngs.push([lat,lng]); heatPts.push([lat,lng,1])});
+              let min=Math.min(...weights), max=Math.max(...weights); let points;
+              if (!isFinite(min)||!isFinite(max)||min===max) points=heatPts.map(([lat,lng])=>[lat,lng,1]); else { const span=max-min; points=heatPts.map(([lat,lng,w])=>{const i=isFinite(w)?(w-min)/span:1; const clamped=Math.max(0.1,Math.min(1,i)); return [lat,lng,clamped];}); }
+              renderHeat(points, latlngs);
+              setStatus(`Heat map built from local file with ${points.length} points.`);
+            } catch (e) {
+              setStatus(`Selected file is not valid JSON: ${esc(e.message || e)}`);
+            }
+          };
+          reader.readAsText(file);
+        }
+
+        document.getElementById('fit-btn')?.addEventListener('click', () => fitToLatLngs(allLatLngs));
+        fileInput?.addEventListener('change', () => {
+          const f = fileInput.files && fileInput.files[0];
+          if (f) loadHeatFromFile(f);
+        });
+        reloadBtn?.addEventListener('click', async () => {
+          const ok = await loadHeatFromEndpoint({
+            max: Number(maxInput.value || 50000),
+            method: methodSelect.value || 'reservoir',
+            weight: weightInput.value || ''
+          });
+          if (!ok) await loadHeatFromUrl(geoUrl);
+        });
+
+        // Initial load
+        (async () => {
+          const ok = await loadHeatFromEndpoint({ max: 50000, method: 'reservoir', weight: '' });
+          if (!ok) await loadHeatFromUrl(geoUrl);
+        })();
+      });
+    </script>
+  </body>
+</html>
