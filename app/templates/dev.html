@@ -134,7 +134,7 @@
     }
 
     // Load and display GeoJSON route, then fit bounds
-    fetch('/static/routes/demo.geojson', {cache: 'no-store'})
+    fetch('/static/routes/Line_3.geojson', {cache: 'no-store'})
       .then(r => {
         if (!r.ok) throw new Error('Failed to load route (' + r.status + ')');
         return r.json();
@@ -152,7 +152,7 @@
       })
       .catch(err => {
         console.error(err);
-        showToast('Could not load the route. Check /static/routes/demo.geojson', true);
+        showToast('Could not load the route. Check /static/routes/path.geojson', true);
         map.setView([0,0], 2);
       });
 
